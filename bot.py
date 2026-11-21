@@ -510,7 +510,16 @@ class Bot:
             myeye = (p[0], p[1], p[2] + st.get("eye_height", 8))
             tcen = (tpos[0], tpos[1], tpos[2] + 4.5)
             has_los = self.los(myeye, tcen)
-            if not has_los or d > 200:
+            grab = None
+            if want_pick is not None and want_pick[1]["kind"] in ("laser", "lightning") and \
+                    not (want_pick[1]["kind"] == "lightning" and "laser" in held and None not in held):
+                gp = want_pick[1]["pos"]
+                if d2(gp, p) < 45 and (want_pick[1]["kind"] == "laser" or None in held):
+                    grab = (gp[0], gp[1])
+            if grab is not None and _os.environ.get("NO_GRAB") != "1":
+                nav_goal = grab  # detour for the weapon; aiming and firing continue below
+                goal_desc = f"grab {want_pick[1]['kind']}"
+            elif not has_los or d > 200:
                 if hp_frac > 0.55 or d < 60:
                     nav_goal = (tpos[0], tpos[1])
                     goal_desc = "hunt"

@@ -84,6 +84,7 @@ class NPC:
 
 NPCS = []
 CUBES = []
+PICKUPS = []
 USE_NPC = os.environ.get("NPCS", "1") == "1"
 
 
@@ -183,6 +184,7 @@ def run_match(seed, n_hunters, verbose=False):
         me.give_lightning()
     NPCS[:] = []
     CUBES[:] = []
+    PICKUPS[:] = []
     if USE_NPC:
         for k in range(12):
             NPCS.append(NPC(100 + k, spawn()))
@@ -217,6 +219,23 @@ def run_match(seed, n_hunters, verbose=False):
             me.boost = a.get("boost", False)
             me.cmd_aim = a.get("aim", me.cmd_aim)
             me.fire = a.get("fire", [False, False])
+            if "take" in a:
+                for pk in list(PICKUPS):
+                    if pk["id"] == a["take"] and math.hypot(pk["pos"][0] - me.pos[0], pk["pos"][1] - me.pos[1]) < 4:
+                        slot = 1 if me.weapons[1] is None else a.get("drop", None)
+                        if slot is None:
+                            break
+                        old = me.weapons[slot]
+                        if pk["kind"] == "laser": me.give_laser()
+                        else: me.give_lightning()
+                        if slot == 0:
+                            me.weapons[0], me.weapons[1] = me.weapons[1], old if old and old["kind"] != "gun" else me.weapons[0]
+                        me.weapons[slot]["cooldown"] = 1.65 if pk["kind"] == "laser" else 1.0
+                        PICKUPS.remove(pk)
+                        if old and slot == 1:
+                            PICKUPS.append({"id": pk["id"] + 1, "kind": old["kind"], "pos": list(me.pos)})
+                        me.events.append({"type": "took", "id": pk["id"], "kind": pk["kind"], "slot": slot})
+                        break
             if a.get("reload") and me.weapons[0]["reload"] == 0 and me.weapons[0]["ammo"] < 12:
                 me.weapons[0]["reload"] = 2.4
             me.events = []
@@ -249,6 +268,10 @@ def run_match(seed, n_hunters, verbose=False):
             if m.alive and m.hp <= 0:
                 m.alive = False
                 m.death_t = t
+                if m.weapons[1]:
+                    PICKUPS.append({"id": 8000 + len(PICKUPS) + 100 * m.id, "kind": m.weapons[1]["kind"], "pos": list(m.pos)})
+                for _ in range(m.cubes + 2):
+                    CUBES.append((m.pos[0] + random.uniform(-2, 2), m.pos[1] + random.uniform(-2, 2), m.pos[2]))
         t += dt
         tick += 1
     alive = sum(1 for m in mechs if m.alive)
@@ -555,7 +578,7 @@ def make_obs(me, mechs, bullets, zone, t, tick):
              "weapons": [dict(w) if w else None for w in me.weapons],
              "in_zone": True, "stats": dict(CFG["mech"])}
     return {"type": "obs", "tick": tick, "t": round(t, 2), "alive": sum(1 for m in mechs if m.alive), "self": selfo,
-            "mechs": vis, "projectiles": projs, "crates": [], "cubes": cubes_vis, "pickups": [], "sounds": [], "beams": [],
+            "mechs": vis, "projectiles": projs, "crates": [], "cubes": cubes_vis, "pickups": [pk for pk in PICKUPS if math.hypot(pk["pos"][0] - me.pos[0], pk["pos"][1] - me.pos[1]) < 200], "sounds": [], "beams": [],
             "events": me.events, "zone": zone, "offer": None, "drops": []}
 
 
