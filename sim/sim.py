@@ -48,6 +48,9 @@ class Mech:
         self.fire = [False, False]
         self.death_t = None
         self.laser_charge = 0
+        self.jink = 1
+        self.jink_until = 0
+        self.jboost = False
 
     def give_laser(self):
         self.weapons[1] = {"kind": "laser", "cooldown": 0, "charge": 0, "stats": dict(CFG["weapons"]["laser"])}
@@ -80,6 +83,7 @@ def run_match(seed, n_hunters, verbose=False):
     global ZONE_SEED
     ZONE_SEED = seed
     rnd = random.Random(seed)
+    for k in STATS: STATS[k] = 0
     random.seed(seed)
     mechs = []
     def spawn():
@@ -91,11 +95,14 @@ def run_match(seed, n_hunters, verbose=False):
     if ME_LASER:
         me.give_laser()
     mechs.append(me)
+    tiers = ([0.0] * 4 + [0.35] * 4 + [0.65] * 4 + [0.9] * 3) if n_hunters == 15 else [rnd.uniform(0.3, 1.0) for _ in range(n_hunters)]
     for i in range(n_hunters):
-        h = Mech(i + 1, spawn(), rnd.uniform(0.3, 1.0))
-        if rnd.random() < LASER_P:
+        h = Mech(i + 1, spawn(), tiers[i])
+        if rnd.random() < LASER_P * (0.4 + h.skill):
             h.give_laser()
         mechs.append(h)
+    if os.environ.get("ME_LASER") == "rand" and rnd.random() < 0.5:
+        me.give_laser()
     hello = json.loads(json.dumps(HELLO))
     hello["slot"] = 0
     b = botmod.Bot(hello)
@@ -133,7 +140,7 @@ def run_match(seed, n_hunters, verbose=False):
             botmod.mf.draw.clear()
             alive_h = [m for m in mechs[1:] if m.alive]
             killed = n_hunters - len(alive_h)
-            active_hunters = 1 + killed
+            active_hunters = 1 + killed if t < 300 else 99
             for k, h in enumerate(alive_h):
                 hunter_ai(h, me, k < active_hunters, t, rnd)
         for m in mechs:
@@ -153,10 +160,14 @@ def run_match(seed, n_hunters, verbose=False):
         t += dt
         tick += 1
     alive = sum(1 for m in mechs if m.alive)
+    near_at_death = sum(1 for m in mechs[1:] if m.alive and math.hypot(m.pos[0]-me.pos[0], m.pos[1]-me.pos[1]) < 150)
     dead_after = sum(1 for m in mechs[1:] if not m.alive)
     place = 1 + sum(1 for m in mechs[1:] if m.alive or (m.death_t or 0) > (me.death_t or 1e9)) if not me.alive else 1
     return dict(seed=seed, survived_t=round(me.death_t or t, 1), kills=dead_after, place=place,
-                worst_ms=round(worst_ms, 1), worst_at=worst_at, avg_ms=round(tot_ms / max(1, n_act), 2), hp=round(me.hp))
+                worst_ms=round(worst_ms, 1), worst_at=worst_at, stats=dict(STATS), near=near_at_death, avg_ms=round(tot_ms / max(1, n_act), 2), hp=round(me.hp))
+
+
+STATS = {'me_shots': 0, 'me_hits': 0, 'h_shots': 0, 'h_hits': 0}
 
 
 def damage(m, amt, by, t, weapon, bearing=None):
@@ -228,6 +239,7 @@ def fire_weapons(m, mechs, bullets, t, rnd):
                         "owner": m, "dist": 0, "dmg": 45})
         g["cooldown"] = 0.24
         g["ammo"] -= 1
+        STATS['me_shots' if m.id == 0 else 'h_shots'] += 1
         if g["ammo"] == 0:
             g["reload"] = 2.4
     L = m.weapons[1]
@@ -283,6 +295,7 @@ def step_bullets(bullets, mechs, dt, t):
                     rear = abs(wrap(br - v.aim[0])) > math.pi / 2
                     dmg = b["dmg"] * (1.5 if rear else 1)
                     damage(v, dmg, b["owner"], t, "gun", br)
+                    STATS['me_hits' if b["owner"].id == 0 else 'h_hits'] += 1
                     b["owner"].events.append({"type": "hit", "target": v.id, "amount": dmg, "weapon": "gun"})
                     hit = True
                     break
@@ -294,21 +307,24 @@ def step_bullets(bullets, mechs, dt, t):
 
 
 def hunter_ai(h, me, active, t, rnd):
+    """Expert-like hunter calibrated on live recordings: full-speed jinks ~0.8 s, boosts sometimes,
+    engages around 60 m, leads shots with the target's current velocity."""
     dx, dy = me.pos[0] - h.pos[0], me.pos[1] - h.pos[1]
     d = math.hypot(dx, dy)
     b = math.atan2(dy, dx)
     zone = zone_at(t)
     if not active or not me.alive:
-        # wander toward zone
         nc = zone["next_center"]
         h.move = [nc[0] - h.pos[0], nc[1] - h.pos[1]]
         n = math.hypot(*h.move) or 1
         h.move = [h.move[0] / n, h.move[1] / n] if n > 20 else [0, 0]
         h.fire = [False, False]
+        h.boost = False
         h.cmd_aim = [math.atan2(h.move[1], h.move[0]) if n > 20 else h.aim[0], 0]
         return
     seen = d < 200 and MAP.los((h.pos[0], h.pos[1], h.pos[2] + 8), (me.pos[0], me.pos[1], me.pos[2] + 4.5))
-    if not seen or d > 120:
+    h.boost = False
+    if not seen or d > 110:
         if not hasattr(h, "pth") or t - getattr(h, "pth_t", -9) > 2:
             h.pth = MAP.astar((h.pos[0], h.pos[1]), (me.pos[0], me.pos[1])) or []
             h.pth_t = t
@@ -320,15 +336,28 @@ def hunter_ai(h, me, active, t, rnd):
             n = math.hypot(*mv) or 1
             h.move = [mv[0] / n, mv[1] / n]
     else:
-        s = 1 if int(t / 1.3 + h.id) % 2 else -1
-        h.move = [-math.sin(b) * s + (0.5 if d > 80 else -0.3) * math.cos(b), math.cos(b) * s + (0.5 if d > 80 else -0.3) * math.sin(b)]
+        if t > getattr(h, "jink_until", 0):
+            h.jink = -getattr(h, "jink", 1)
+            h.jink_until = t + rnd.uniform(0.5, 1.1)
+            h.jboost = rnd.random() < 0.3
+        s = h.jink
+        rad = 0.6 if d > 80 else (-0.6 if d < 40 else 0.0)
+        mv = [-math.sin(b) * s + rad * math.cos(b), math.cos(b) * s + rad * math.sin(b)]
+        nx_, ny_ = h.pos[0] + mv[0] * 5, h.pos[1] + mv[1] * 5
+        if not MAP.walkable(nx_, ny_):
+            h.jink = -h.jink
+        h.move = mv
+        h.boost = h.jboost and h.energy > 30
     if seen:
-        lead = d / 252 * h.skill
-        px, py = me.pos[0] + me.vel[0] * lead, me.pos[1] + me.vel[1] * lead
-        err = (1 - h.skill) * 0.05
+        tz = me.pos[2] + 4.5
+        tt = 0.05
+        for _ in range(3):
+            px, py = me.pos[0] + me.vel[0] * tt, me.pos[1] + me.vel[1] * tt
+            tt = 0.05 + math.hypot(px - h.pos[0], py - h.pos[1]) / 252
+        err = (1 - h.skill) * 0.03 + 0.004
         h.cmd_aim = [math.atan2(py - h.pos[1], px - h.pos[0]) + rnd.gauss(0, err),
-                     math.atan2(me.pos[2] + 4.5 - h.pos[2] - 7, d)]
-        on = abs(wrap(h.aim[0] - h.cmd_aim[0])) < 0.03
+                     math.atan2(tz - h.pos[2] - 7, d)]
+        on = abs(wrap(h.aim[0] - h.cmd_aim[0])) < math.atan2(2.2, max(d, 1))
         h.fire = [on, False]
         if h.weapons[1]:
             L = h.weapons[1]
