@@ -484,7 +484,7 @@ class Bot:
             elif "laser" in tr.weapons and not has_laser:
                 pref = 50.0
             else:
-                pref = 85.0
+                pref = 130.0
             if tr.hp < me["hp"] * 0.5:
                 pref *= 0.75
             # chase with path if no LOS / far
