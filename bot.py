@@ -20,15 +20,6 @@ except Exception:  # pragma: no cover
     NavMap = None
 
 TAU = 2 * math.pi
-import json as _json
-import os as _os
-P = {"lose_ratio": 0.85, "lose_hp": 0.7, "heal_until": 0.95, "heal_start": 0.95, "pref_gun": 85.0,
-     "pref_vs_laser": 50.0, "pref_light": 28.0, "pref_both": 40.0, "strafe_min": 0.4, "strafe_max": 0.9,
-     "flip_p": 0.9, "retreat": 1.0, "strafe_boost": 0.0, "iso": 0.0}
-try:
-    P.update(_json.loads(_os.environ.get("BOT_PARAMS", "{}")))
-except Exception:
-    pass
 WEAPON_SCORE = {"laser": 3.0, "gun": 2.6, "lightning": 2.4, "mortar": 1.0}
 UPGRADE_PRIO = ["armor", "plating", "laser_damage", "laser_charge", "nanites", "gun_damage", "gun_rate",
                 "lightning_efficiency", "gyros", "lightning_range", "gun_mag", "servos", "sensors",
@@ -141,8 +132,6 @@ class Bot:
         self.explore_until = 0
         self.last_threat_pos = None
         self.last_threat_t = -99
-        self.iso = None
-        self.iso_t = -99
         gc.collect()
         gc.freeze()
         gc.set_threshold(50000, 50, 100)
@@ -447,13 +436,13 @@ class Bot:
             their_dps = max(30.0, their_dps)
             t_me_die = me["hp"] / their_dps
             t_them_die = target[1].hp / our_dps + (their_hp - target[1].hp) / our_dps * 0.8
-            losing = P["retreat"] > 0 and (t_me_die < t_them_die * P["lose_ratio"] and hp_frac < P["lose_hp"]) or (hp_frac < 0.3 and t_me_die < t_them_die * 1.3)
+            losing = (t_me_die < t_them_die * 0.85 and hp_frac < 0.7) or (hp_frac < 0.3 and t_me_die < t_them_die * 1.3)
             if target[1].hp < 160 and hp_frac > 0.15:
                 losing = False  # finish it
         if losing:
             self.retreat_until = max(self.retreat_until, t + 2.5)
         # keep hiding until healed while nobody is right on top of us
-        if self.mode == "retreat" and hp_frac < P["heal_until"] and not (target and target[0] < 25):
+        if self.mode == "retreat" and hp_frac < 0.8 and not (target and target[0] < 25):
             self.retreat_until = max(self.retreat_until, t + 0.2)
         retreating = t < self.retreat_until and not zone_urgent and target is not None
         self.mode = "retreat" if retreating else "normal"
@@ -489,39 +478,21 @@ class Bot:
             has_light = "lightning" in held
             has_laser = "laser" in held
             if has_light and not has_laser:
-                pref = P["pref_light"]
+                pref = 28.0
             elif has_light:
-                pref = P["pref_both"]
+                pref = 40.0
             elif "laser" in tr.weapons and not has_laser:
-                pref = P["pref_vs_laser"]
+                pref = 50.0
             else:
-                pref = P["pref_gun"]
+                pref = 85.0
             if tr.hp < me["hp"] * 0.5:
                 pref *= 0.75
-            if "lightning" in tr.weapons and not has_light:
-                pref = max(pref, 75.0)  # stay outside their arc range
             # chase with path if no LOS / far
             tpos = tr.pos
             myeye = (p[0], p[1], p[2] + st.get("eye_height", 8))
             tcen = (tpos[0], tpos[1], tpos[2] + 4.5)
             has_los = self.los(myeye, tcen)
-            others = []
-            for e2 in enemies:
-                if e2[1] is tr or e2[0] > 200:
-                    continue
-                o = e2[1].pos
-                if self.los((o[0], o[1], o[2] + 8), (p[0], p[1], p[2] + 4.5)):
-                    others.append(e2[1])
-            if others and P["iso"] > 0:
-                if t - self.iso_t > 0.5:
-                    self.iso = self.find_iso(me, tr, others, inzone_pt)
-                    self.iso_t = t
-            else:
-                self.iso = None
-            if self.iso is not None and d2(self.iso, p) > 2.5:
-                nav_goal = self.iso
-                goal_desc = f"iso {tr.id}"
-            elif not has_los or d > 200:
+            if not has_los or d > 200:
                 if hp_frac > 0.55 or d < 60:
                     nav_goal = (tpos[0], tpos[1])
                     goal_desc = "hunt"
@@ -532,16 +503,13 @@ class Bot:
                 # strafe + range keeping
                 b = math.atan2(tpos[1] - p[1], tpos[0] - p[0])
                 if t > self.strafe_until:
-                    self.strafe_dir = -self.strafe_dir if random.random() < P["flip_p"] else self.strafe_dir
-                    self.strafe_until = t + random.uniform(P["strafe_min"], P["strafe_max"])
-                    self.sboost = random.random() < P["strafe_boost"]
+                    self.strafe_dir = -self.strafe_dir if random.random() < 0.7 else self.strafe_dir
+                    self.strafe_until = t + random.uniform(0.5, 1.4)
                 if tr.charging and t - (tr.charge_since or t) > 0.35:
                     # laser incoming: jink
                     if random.random() < 0.5:
                         self.strafe_dir = -self.strafe_dir
                     boost = me["energy"] > 15
-                if getattr(self, "sboost", False) and me["energy"] > 40:
-                    boost = True
                 perp = (-math.sin(b) * self.strafe_dir, math.cos(b) * self.strafe_dir)
                 radial = 0.0
                 if d > pref * 1.25:
@@ -563,7 +531,7 @@ class Bot:
                         move = mv2
                 goal_desc = f"fight {tr.id}"
         elif not target and not retreating and not (zone_urgent and zone_goal is not None) and \
-                hp_frac < P["heal_start"] and t - self.last_damage_t < 25 and t - self.last_damage_t > 0.0 and \
+                hp_frac < 0.75 and t - self.last_damage_t < 25 and t - self.last_damage_t > 0.0 and \
                 (zone_goal is None or d2(p, zone_goal) < 40) and dist_c < zr - 15:
             goal_desc = "heal"  # stand still (silent) and regenerate
             nav_goal = None
@@ -850,41 +818,6 @@ class Bot:
                     best = (score, q)
             if best:
                 return best[1]
-        return None
-
-    def find_iso(self, me, target, others, ok):
-        """Nearby spot that keeps LOS to `target` but hides us from every enemy in `others`."""
-        if self.map is None or not others:
-            return None
-        p = me["pos"]
-        deadline = time.perf_counter() + 0.006
-        best = None
-        for r in (6, 12, 18, 25, 32):
-            for k in range(16):
-                if time.perf_counter() > deadline:
-                    return best[1] if best else None
-                a = k * TAU / 16
-                q = (p[0] + math.cos(a) * r, p[1] + math.sin(a) * r)
-                if not self.map.walkable(*q) or not ok(q, 10):
-                    continue
-                mid = (p[0] + math.cos(a) * r * 0.5, p[1] + math.sin(a) * r * 0.5)
-                if not self.map.walkable(*mid):
-                    continue
-                fz = self.map.floor_at(*q)
-                seen_by = 0
-                for tr in others:
-                    e = (tr.pos[0], tr.pos[1], tr.pos[2] + 8)
-                    if self.map.los(e, (q[0], q[1], fz + 4.5)) or self.map.los(e, (q[0], q[1], fz + 8.5)):
-                        seen_by += 1
-                tp = target.pos
-                sees_t = self.map.los((q[0], q[1], fz + 8), (tp[0], tp[1], tp[2] + 4.5))
-                score = seen_by * 100 + (0 if sees_t else 35) + r
-                if best is None or score < best[0]:
-                    best = (score, q, seen_by)
-            if best and best[2] == 0 and best[0] < 60:
-                break
-        if best and best[2] < len(others):
-            return best[1]
         return None
 
     def explore_point(self, me, nc, nr, zc, zr):
