@@ -23,7 +23,7 @@ TAU = 2 * math.pi
 import os as _os
 P_FARM = float(_os.environ.get("P_FARM", "60"))  # how strongly to seek NPC drones for cubes (0 = off)
 WEAPON_SCORE = {"laser": 3.0, "gun": 2.6, "lightning": 2.4, "mortar": 1.0}
-UPGRADE_PRIO = ["armor", "plating", "laser_damage", "laser_charge", "nanites", "gun_damage", "gun_rate",
+UPGRADE_PRIO = ["plating", "armor", "laser_damage", "laser_charge", "nanites", "gun_damage", "gun_rate",
                 "lightning_efficiency", "gyros", "lightning_range", "gun_mag", "servos", "sensors",
                 "gun_velocity", "laser_pierce", "lightning_chain", "capacitor", "reactor", "jets",
                 "mortar_reload", "mortar_velocity", "mortar_splash"]
