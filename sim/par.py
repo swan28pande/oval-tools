@@ -19,6 +19,7 @@ if __name__ == "__main__":
     print(f"n={n} kills={sum(k)/n:.2f} survive={sum(r['survived_t'] for r in res)/n:.0f}s worst_ms={max(r['worst_ms'] for r in res)}")
     S = {k: sum(r['stats'][k] for r in res) for k in res[0]['stats']}
     from collections import Counter
+    print("our cubes at end: mean", sum(r.get('cubes', 0) for r in res) / n)
     print("attackers within 150 m at death:", sorted(Counter(r['near'] for r in res).items()), " kills hist:", sorted(Counter(r['kills'] for r in res).items()))
     print(f"our gun hit rate {S['me_hits']/max(1,S['me_shots']):.2f}  hunters' {S['h_hits']/max(1,S['h_shots']):.2f}")
     print(sorted(((r['worst_ms'], r['worst_at']) for r in res), key=lambda x: -x[0])[:5])

@@ -49,8 +49,12 @@ class Mech:
         self.death_t = None
         self.laser_charge = 0
         self.jink = 1
+        self.cubes = 0
         self.jink_until = 0
         self.jboost = False
+
+    def give_lightning(self):
+        self.weapons[1] = {"kind": "lightning", "cooldown": 0, "stats": dict(CFG["weapons"]["lightning"])}
 
     def give_laser(self):
         self.weapons[1] = {"kind": "laser", "cooldown": 0, "charge": 0, "stats": dict(CFG["weapons"]["laser"])}
@@ -59,6 +63,75 @@ class Mech:
 ZONE_SEED = 1
 LASER_P = float(os.environ.get('LASER_P', '0.5'))
 ME_LASER = os.environ.get('ME_LASER') == '1'
+LIGHT_P = float(os.environ.get('LIGHT_P', '0.3'))
+
+
+class NPC:
+    def __init__(self, id, pos):
+        self.id = id
+        self.home = (pos[0], pos[1])
+        self.pos = [pos[0], pos[1], MAP.floor_at(*pos)]
+        self.vel = [0, 0, 0]
+        self.aim = [0, 0]
+        self.hp = 350
+        self.alive = True
+        self.cd = 0
+        self.events = []
+        self.last_dmg = -99
+        self.attacker = None
+        self.cubes = 0
+
+
+NPCS = []
+CUBES = []
+USE_NPC = os.environ.get("NPCS", "1") == "1"
+
+
+def npc_step(n, mechs, bullets, dt, t, rnd):
+    n.cd -= dt
+    tgt = None
+    if n.attacker is not None and n.attacker.alive and math.hypot(n.attacker.pos[0] - n.pos[0], n.attacker.pos[1] - n.pos[1]) < 90:
+        tgt = n.attacker
+    else:
+        best = 45
+        for m in mechs:
+            if not m.alive:
+                continue
+            d = math.hypot(m.pos[0] - n.pos[0], m.pos[1] - n.pos[1])
+            if d < best and MAP.los((n.pos[0], n.pos[1], n.pos[2] + 3), (m.pos[0], m.pos[1], m.pos[2] + 4.5)):
+                best, tgt = d, m
+    if tgt is None or n.cd > 0:
+        return
+    dx, dy = tgt.pos[0] - n.pos[0], tgt.pos[1] - n.pos[1]
+    d = math.hypot(dx, dy)
+    yaw = math.atan2(dy, dx) + rnd.gauss(0, math.radians(2.5))
+    pit = math.atan2(tgt.pos[2] + 4.5 - n.pos[2] - 3, d)
+    v = (math.cos(pit) * math.cos(yaw) * 90, math.cos(pit) * math.sin(yaw) * 90, math.sin(pit) * 90)
+    bullets.append({"id": rnd.randint(1, 10 ** 9), "kind": "npc", "pos": [n.pos[0], n.pos[1], n.pos[2] + 3], "vel": list(v),
+                    "owner": n, "dist": 0, "dmg": 25, "speed": 90})
+    n.cd = 1.0
+
+
+def grab_cubes(mechs):
+    keep = []
+    for c in CUBES:
+        best = None
+        for m in mechs:
+            if not m.alive:
+                continue
+            d = math.hypot(m.pos[0] - c[0], m.pos[1] - c[1])
+            if d < 3.5 and (best is None or d < best[0]):
+                best = (d, m)
+        if best:
+            m = best[1]
+            m.cubes += 1
+            old = m.max_hp
+            m.max_hp = 1400 * (1 + 0.04 * min(m.cubes, 10))
+            m.hp += m.max_hp - old
+            m.events.append({"type": "pickup", "cubes": m.cubes})
+        else:
+            keep.append(c)
+    CUBES[:] = keep
 
 
 def zone_at(t):
@@ -98,11 +171,21 @@ def run_match(seed, n_hunters, verbose=False):
     tiers = ([0.0] * 4 + [0.35] * 4 + [0.65] * 4 + [0.9] * 3) if n_hunters == 15 else [rnd.uniform(0.3, 1.0) for _ in range(n_hunters)]
     for i in range(n_hunters):
         h = Mech(i + 1, spawn(), tiers[i])
-        if rnd.random() < LASER_P * (0.4 + h.skill):
+        r_ = rnd.random()
+        if r_ < LASER_P * (0.4 + h.skill):
             h.give_laser()
+        elif r_ < LASER_P * (0.4 + h.skill) + LIGHT_P:
+            h.give_lightning()
         mechs.append(h)
     if os.environ.get("ME_LASER") == "rand" and rnd.random() < 0.5:
         me.give_laser()
+    if os.environ.get("ME_LIGHT") == "1":
+        me.give_lightning()
+    NPCS[:] = []
+    CUBES[:] = []
+    if USE_NPC:
+        for k in range(12):
+            NPCS.append(NPC(100 + k, spawn()))
     hello = json.loads(json.dumps(HELLO))
     hello["slot"] = 0
     b = botmod.Bot(hello)
@@ -152,7 +235,16 @@ def run_match(seed, n_hunters, verbose=False):
                 damage(m, zone["dps"] * dt, None, t, "zone")
             if t - m.last_dmg > 5 and m.hp < m.max_hp:
                 m.hp = min(m.max_hp, m.hp + 45 * dt)
+        for n in NPCS:
+            if n.alive:
+                npc_step(n, mechs, bullets, dt, t, rnd)
         step_bullets(bullets, mechs, dt, t)
+        for n in NPCS:
+            if n.alive and n.hp <= 0:
+                n.alive = False
+                CUBES.append((n.pos[0] + 1, n.pos[1], n.pos[2]))
+                CUBES.append((n.pos[0] - 1, n.pos[1] + 1, n.pos[2]))
+        grab_cubes(mechs)
         for m in mechs:
             if m.alive and m.hp <= 0:
                 m.alive = False
@@ -164,7 +256,7 @@ def run_match(seed, n_hunters, verbose=False):
     dead_after = sum(1 for m in mechs[1:] if not m.alive)
     place = 1 + sum(1 for m in mechs[1:] if m.alive or (m.death_t or 0) > (me.death_t or 1e9)) if not me.alive else 1
     return dict(seed=seed, survived_t=round(me.death_t or t, 1), kills=dead_after, place=place,
-                worst_ms=round(worst_ms, 1), worst_at=worst_at, stats=dict(STATS), near=near_at_death, avg_ms=round(tot_ms / max(1, n_act), 2), hp=round(me.hp))
+                worst_ms=round(worst_ms, 1), worst_at=worst_at, cubes=me.cubes, stats=dict(STATS), near=near_at_death, avg_ms=round(tot_ms / max(1, n_act), 2), hp=round(me.hp))
 
 
 STATS = {'me_shots': 0, 'me_hits': 0, 'h_shots': 0, 'h_hits': 0}
@@ -236,13 +328,56 @@ def fire_weapons(m, mechs, bullets, t, rnd):
         d = (math.cos(pit) * math.cos(yaw), math.cos(pit) * math.sin(yaw), math.sin(pit))
         o = [m.pos[0] + d[0] * 3, m.pos[1] + d[1] * 3, m.pos[2] + 7 + d[2] * 3]
         bullets.append({"id": rnd.randint(1, 10 ** 9), "kind": "gun", "pos": o, "vel": [d[0] * 252, d[1] * 252, d[2] * 252],
-                        "owner": m, "dist": 0, "dmg": 45})
+                        "owner": m, "dist": 0, "dmg": 45 * (1 + 0.04 * min(m.cubes, 10))})
         g["cooldown"] = 0.24
         g["ammo"] -= 1
         STATS['me_shots' if m.id == 0 else 'h_shots'] += 1
         if g["ammo"] == 0:
             g["reload"] = 2.4
     L = m.weapons[1]
+    if L and L["kind"] == "lightning":
+        if m.fire[1] and L["cooldown"] <= 0 and m.energy >= 3:
+            L["cooldown"] = 0.25
+            m.energy -= 3
+            o = (m.pos[0], m.pos[1], m.pos[2] + 7)
+            cands = [v for v in mechs if v is not m and v.alive] + [n for n in NPCS if n.alive]
+            best = None
+            for v in cands:
+                d = math.hypot(v.pos[0] - o[0], v.pos[1] - o[1])
+                if d > 45 or abs(wrap(math.atan2(v.pos[1] - o[1], v.pos[0] - o[0]) - m.aim[0])) > math.radians(15):
+                    continue
+                if not MAP.los(o, (v.pos[0], v.pos[1], v.pos[2] + 3)):
+                    continue
+                if best is None or d < best[0]:
+                    best = (d, v)
+            chain = []
+            if best:
+                chain.append(best[1])
+                cur = best[1]
+                for _ in range(2):
+                    nxt = None
+                    for v in cands:
+                        if v in chain:
+                            continue
+                        dd = math.hypot(v.pos[0] - cur.pos[0], v.pos[1] - cur.pos[1])
+                        if dd < 14 and (nxt is None or dd < nxt[0]):
+                            nxt = (dd, v)
+                    if not nxt:
+                        break
+                    chain.append(nxt[1]); cur = nxt[1]
+            mult = 1 + 0.04 * min(m.cubes, 10)
+            for k, v in enumerate(chain):
+                dmg = 60 * mult * (0.7 ** k)
+                if isinstance(v, NPC):
+                    v.hp -= dmg; v.attacker = m
+                else:
+                    br = math.atan2(o[1] - v.pos[1], o[0] - v.pos[0])
+                    rear = abs(wrap(br - v.aim[0])) > math.pi / 2
+                    dmg *= 1.5 if rear else 1
+                    damage(v, dmg, m, t, "lightning", br)
+                m.events.append({"type": "hit", "target": v.id, "amount": dmg, "weapon": "lightning"})
+                m.last_dmg = t
+        L["cooldown"] = max(0, L["cooldown"])
     if L and L["kind"] == "laser":
         if m.fire[1] and L["cooldown"] <= 0:
             L["charge"] = min(0.75, L["charge"] + 0.05)
@@ -263,7 +398,7 @@ def fire_weapons(m, mechs, bullets, t, rnd):
                 cx, cy, cz = o[0] + d[0] * tt, o[1] + d[1] * tt, o[2] + d[2] * tt
                 if math.hypot(cx - v.pos[0], cy - v.pos[1]) < 2.5 and v.pos[2] - 0.5 < cz < v.pos[2] + 9.5:
                     if MAP.los(o, (cx, cy, cz)):
-                        dmg = 315 * frac
+                        dmg = 315 * frac * (1 + 0.04 * min(m.cubes, 10))
                         rear = abs(wrap(math.atan2(o[1] - v.pos[1], o[0] - v.pos[0]) - v.aim[0])) > math.pi / 2
                         dmg *= 1.5 if rear else 1
                         damage(v, dmg, m, t, "laser", math.atan2(o[1] - v.pos[1], o[0] - v.pos[0]))
@@ -282,10 +417,22 @@ def step_bullets(bullets, mechs, dt, t):
         for s in range(4):
             for i in range(3):
                 b["pos"][i] += b["vel"][i] * dt / 4
-            b["dist"] += 252 * dt / 4
+            b["dist"] += b.get("speed", 252) * dt / 4
             x, y, z = b["pos"]
             if z < MAP.top[MAP._ij(x, y)[1], MAP._ij(x, y)[0]]:
                 hit = True
+                break
+            for n in NPCS:
+                if not n.alive or b["owner"] is n or isinstance(b["owner"], NPC):
+                    continue
+                if math.hypot(x - n.pos[0], y - n.pos[1]) < 2.1 and n.pos[2] - 0.3 < z < n.pos[2] + 3.8:
+                    n.hp -= b["dmg"]
+                    n.attacker = b["owner"]
+                    b["owner"].last_dmg = t
+                    b["owner"].events.append({"type": "hit", "target": n.id, "amount": b["dmg"], "weapon": "gun"})
+                    hit = True
+                    break
+            if hit:
                 break
             for v in mechs:
                 if v is b["owner"] or not v.alive:
@@ -294,8 +441,9 @@ def step_bullets(bullets, mechs, dt, t):
                     br = math.atan2(-b["vel"][1], -b["vel"][0])
                     rear = abs(wrap(br - v.aim[0])) > math.pi / 2
                     dmg = b["dmg"] * (1.5 if rear else 1)
-                    damage(v, dmg, b["owner"], t, "gun", br)
-                    STATS['me_hits' if b["owner"].id == 0 else 'h_hits'] += 1
+                    damage(v, dmg, b["owner"] if not isinstance(b["owner"], NPC) else None, t, "npc" if isinstance(b["owner"], NPC) else "gun", br)
+                    if not isinstance(b["owner"], NPC):
+                        STATS['me_hits' if b["owner"].id == 0 else 'h_hits'] += 1
                     b["owner"].events.append({"type": "hit", "target": v.id, "amount": dmg, "weapon": "gun"})
                     hit = True
                     break
@@ -341,7 +489,8 @@ def hunter_ai(h, me, active, t, rnd):
             h.jink_until = t + rnd.uniform(0.5, 1.1)
             h.jboost = rnd.random() < 0.3
         s = h.jink
-        rad = 0.6 if d > 80 else (-0.6 if d < 40 else 0.0)
+        hl = h.weapons[1] and h.weapons[1]["kind"] == "lightning"
+        rad = (0.7 if d > 35 else (-0.5 if d < 20 else 0.0)) if hl else (0.6 if d > 80 else (-0.6 if d < 40 else 0.0))
         mv = [-math.sin(b) * s + rad * math.cos(b), math.cos(b) * s + rad * math.sin(b)]
         nx_, ny_ = h.pos[0] + mv[0] * 5, h.pos[1] + mv[1] * 5
         if not MAP.walkable(nx_, ny_):
@@ -359,7 +508,9 @@ def hunter_ai(h, me, active, t, rnd):
                      math.atan2(tz - h.pos[2] - 7, d)]
         on = abs(wrap(h.aim[0] - h.cmd_aim[0])) < math.atan2(2.2, max(d, 1))
         h.fire = [on, False]
-        if h.weapons[1]:
+        if h.weapons[1] and h.weapons[1]["kind"] == "lightning":
+            h.fire[1] = d < 44 and abs(wrap(h.aim[0] - math.atan2(dy, dx))) < 0.22
+        elif h.weapons[1]:
             L = h.weapons[1]
             if L["charge"] < 0.75:
                 h.fire[1] = L["cooldown"] <= 0
@@ -380,17 +531,31 @@ def make_obs(me, mechs, bullets, zone, t, tick):
         los = MAP.los((me.pos[0], me.pos[1], me.pos[2] + 8), (m.pos[0], m.pos[1], m.pos[2] + 4.5))
         if los and (d < 45 or (d < 200 and abs(wrap(b - me.aim[0])) < math.radians(60))):
             vis.append({"id": m.id, "kind": "mech", "pos": [round(v, 2) for v in m.pos], "vel": [round(v, 2) for v in m.vel],
-                        "aim": list(m.aim), "hp": m.hp, "max_hp": 1400, "cubes": 0,
+                        "aim": list(m.aim), "hp": m.hp, "max_hp": m.max_hp, "cubes": m.cubes,
                         "weapons": [w["kind"] for w in m.weapons if w],
                         "charging": bool(m.weapons[1] and m.weapons[1].get("charge", 0) > 0)})
-    projs = [{"id": b["id"], "kind": "gun", "pos": b["pos"], "vel": b["vel"]} for b in bullets if b["owner"] is not me]
+    for n in NPCS:
+        if not n.alive:
+            continue
+        d = math.hypot(n.pos[0] - me.pos[0], n.pos[1] - me.pos[1])
+        bb = math.atan2(n.pos[1] - me.pos[1], n.pos[0] - me.pos[0])
+        if (d < 45 or (d < 200 and abs(wrap(bb - me.aim[0])) < math.radians(60))) and \
+                MAP.los((me.pos[0], me.pos[1], me.pos[2] + 8), (n.pos[0], n.pos[1], n.pos[2] + 3)):
+            vis.append({"id": n.id, "kind": "npc", "pos": list(n.pos), "vel": [0, 0, 0], "aim": [0, 0], "hp": n.hp, "max_hp": 350})
+    cubes_vis = []
+    for k, c in enumerate(CUBES):
+        d = math.hypot(c[0] - me.pos[0], c[1] - me.pos[1])
+        bb = math.atan2(c[1] - me.pos[1], c[0] - me.pos[0])
+        if d < 45 or (d < 200 and abs(wrap(bb - me.aim[0])) < math.radians(60)):
+            cubes_vis.append({"id": 5000 + k, "pos": list(c)})
+    projs = [{"id": b["id"], "kind": b["kind"], "pos": b["pos"], "vel": b["vel"]} for b in bullets if b["owner"] is not me]
     zc, zr = (zone["center"], zone["radius"])
     selfo = {"id": 0, "pos": list(me.pos), "vel": list(me.vel), "aim": list(me.aim), "hp": me.hp, "max_hp": me.max_hp,
-             "energy": me.energy, "max_energy": 100, "grounded": True, "cubes": 0, "upgrades": [],
+             "energy": me.energy, "max_energy": 100, "grounded": True, "cubes": me.cubes, "upgrades": [],
              "weapons": [dict(w) if w else None for w in me.weapons],
              "in_zone": True, "stats": dict(CFG["mech"])}
     return {"type": "obs", "tick": tick, "t": round(t, 2), "alive": sum(1 for m in mechs if m.alive), "self": selfo,
-            "mechs": vis, "projectiles": projs, "crates": [], "cubes": [], "pickups": [], "sounds": [], "beams": [],
+            "mechs": vis, "projectiles": projs, "crates": [], "cubes": cubes_vis, "pickups": [], "sounds": [], "beams": [],
             "events": me.events, "zone": zone, "offer": None, "drops": []}
 
 

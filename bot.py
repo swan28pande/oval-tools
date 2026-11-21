@@ -20,6 +20,8 @@ except Exception:  # pragma: no cover
     NavMap = None
 
 TAU = 2 * math.pi
+import os as _os
+P_FARM = float(_os.environ.get("P_FARM", "60"))  # how strongly to seek NPC drones for cubes (0 = off)
 WEAPON_SCORE = {"laser": 3.0, "gun": 2.6, "lightning": 2.4, "mortar": 1.0}
 UPGRADE_PRIO = ["armor", "plating", "laser_damage", "laser_charge", "nanites", "gun_damage", "gun_rate",
                 "lightning_efficiency", "gyros", "lightning_range", "gun_mag", "servos", "sensors",
@@ -131,6 +133,7 @@ class Bot:
         self.explore = None
         self.explore_until = 0
         self.climb_key = None
+        self.npc_known = {}
         self.climb_t0 = 0
         self.last_threat_pos = None
         self.last_threat_t = -99
@@ -278,10 +281,16 @@ class Bot:
                     tr.update(m, t)
                 else:
                     self.npcs[m["id"]] = Track(m, t)
+                self.npc_known[m["id"]] = (m["pos"], t, m.get("hp", 350))
         for k in [k for k, v in self.tracks.items() if t - v.seen_t > 6]:
             del self.tracks[k]
         for k in [k for k, v in self.npcs.items() if t - v.seen_t > 3]:
             del self.npcs[k]
+        seen_npc = {m["id"] for m in obs["mechs"] if m["kind"] != "mech"}
+        for k in list(self.npc_known):
+            pos_, ts, _ = self.npc_known[k]
+            if k not in seen_npc and (t - ts > 90 or (d2(pos_, p) < 45 and t - ts > 1.5)):
+                del self.npc_known[k]
         for s in obs["sounds"]:
             if s["kind"] in ("gun", "laser", "lightning", "laser_charge", "mortar", "step", "boost", "jet") and s["dist"] != "far":
                 self.sound_dir = s["bearing"]
@@ -552,7 +561,7 @@ class Bot:
                     continue
                 if self.map and abs(c["pos"][2] - self.map.floor_at(c["pos"][0], c["pos"][1])) > 2.5:
                     if abs(c["pos"][2] - p[2]) < 3:
-                        cands.append((d2(c["pos"], p) - 40, (c["pos"][0], c["pos"][1]), "cube"))
+                        cands.append((d2(c["pos"], p) - 90, (c["pos"][0], c["pos"][1]), "cube"))
                         continue
                     rc = self.roof_cost(me, c["pos"], t, hp_frac, near_threats, inzone_pt)
                     if rc is not None:
@@ -560,7 +569,7 @@ class Bot:
                     continue
                 if not inzone_pt(c["pos"]):
                     continue
-                cands.append((d2(c["pos"], p) - 40, (c["pos"][0], c["pos"][1]), "cube"))
+                cands.append((d2(c["pos"], p) - 90, (c["pos"][0], c["pos"][1]), "cube"))
             if hp_frac > 0.85:
                 for c in obs["crates"]:
                     if self.map and abs(c["pos"][2] - self.map.floor_at(c["pos"][0], c["pos"][1])) > 2.5:
@@ -573,6 +582,14 @@ class Bot:
                 cands.append((-want_pick[0] + 10, (pk["pos"][0], pk["pos"][1]), "loot"))
             if want_roof:
                 cands.append((-want_roof[0] + 10, tuple(want_roof[1]), "roofloot"))
+            if hp_frac > 0.7 and (me.get("cubes", 0) or 0) < 10 and P_FARM > 0:
+                for nid, (npos, ts, nhp) in self.npc_known.items():
+                    if not inzone_pt(npos, 10):
+                        continue
+                    dn = d2(npos, p)
+                    if dn > 220:
+                        continue
+                    cands.append((dn - P_FARM, (npos[0], npos[1]), "npc"))
             for dr in obs.get("drops", []):
                 dd = d2(dr["pos"], p)
                 if dd < 220 and dr["lands_in"] < dd / speed + 6 and inzone_pt(dr["pos"], 4) and not near_threats:
@@ -585,6 +602,18 @@ class Bot:
                 goal_desc = cands[0][2]
                 if goal_desc.startswith("roof"):
                     move, jump, boost = self.climb_to(me, nav_goal, t)
+                    nav_goal = None
+                elif goal_desc == "npc" and d2(nav_goal, p) < 38:
+                    # hold a standoff and sidestep; the drone's 90 m/s bullets are easy to dodge
+                    b = math.atan2(nav_goal[1] - p[1], nav_goal[0] - p[0])
+                    if t > self.strafe_until:
+                        self.strafe_dir = -self.strafe_dir
+                        self.strafe_until = t + random.uniform(0.6, 1.2)
+                    move = (-math.sin(b) * self.strafe_dir, math.cos(b) * self.strafe_dir)
+                    ahead = (p[0] + move[0] * 6, p[1] + move[1] * 6)
+                    if self.map and not self.map.walkable(*ahead):
+                        self.strafe_dir = -self.strafe_dir
+                        move = (-move[0], -move[1])
                     nav_goal = None
             elif zone_goal is not None:
                 nav_goal = zone_goal
