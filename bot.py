@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover
 TAU = 2 * math.pi
 import json as _json
 import os as _os
-P = {"lose_ratio": 0.85, "lose_hp": 0.7, "heal_until": 0.95, "heal_start": 0.95, "pref_gun": 130.0,
+P = {"lose_ratio": 0.85, "lose_hp": 0.7, "heal_until": 0.95, "heal_start": 0.95, "pref_gun": 85.0,
      "pref_vs_laser": 50.0, "pref_light": 28.0, "pref_both": 40.0, "strafe_min": 0.4, "strafe_max": 0.9,
      "flip_p": 0.9, "retreat": 1.0, "strafe_boost": 0.0, "iso": 0.0}
 try:
@@ -498,6 +498,8 @@ class Bot:
                 pref = P["pref_gun"]
             if tr.hp < me["hp"] * 0.5:
                 pref *= 0.75
+            if "lightning" in tr.weapons and not has_light:
+                pref = max(pref, 75.0)  # stay outside their arc range
             # chase with path if no LOS / far
             tpos = tr.pos
             myeye = (p[0], p[1], p[2] + st.get("eye_height", 8))
