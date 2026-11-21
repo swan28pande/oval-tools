@@ -130,6 +130,8 @@ class Bot:
         self.goal_desc = ""
         self.explore = None
         self.explore_until = 0
+        self.climb_key = None
+        self.climb_t0 = 0
         self.last_threat_pos = None
         self.last_threat_t = -99
         gc.collect()
@@ -344,6 +346,7 @@ class Bot:
         held = [w_["kind"] if w_ else None for w_ in me["weapons"]]
         reach = self.cfg["loot"]["pickup_radius"]
         want_pick = None
+        want_roof = None
         for pk in obs["pickups"]:
             if self.bad_targets.get(pk["id"], -1) > t:
                 continue
@@ -373,7 +376,13 @@ class Bot:
                     act["drop"] = drop
                 continue
             if self.map and abs(pk["pos"][2] - self.map.floor_at(pk["pos"][0], pk["pos"][1])) > 2.5:
-                continue  # on a roof
+                # on a roof: worth a jet climb when calm and close
+                rc = self.roof_cost(me, pk["pos"], t, hp_frac, near_threats, inzone_pt)
+                if rc is not None:
+                    score = gain * 90 - dh - rc
+                    if want_roof is None or score > want_roof[0]:
+                        want_roof = (score, pk["pos"], "roofloot")
+                continue
             if self.map and not self.map.walkable(pk["pos"][0], pk["pos"][1]):
                 # maybe just next to a wall: still try if close
                 if dh > 30:
@@ -484,7 +493,7 @@ class Bot:
             elif "laser" in tr.weapons and not has_laser:
                 pref = 50.0
             else:
-                pref = 60.0
+                pref = 85.0
             if tr.hp < me["hp"] * 0.5:
                 pref *= 0.75
             # chase with path if no LOS / far
@@ -542,6 +551,12 @@ class Bot:
                 if self.bad_targets.get(c["id"], -1) > t:
                     continue
                 if self.map and abs(c["pos"][2] - self.map.floor_at(c["pos"][0], c["pos"][1])) > 2.5:
+                    if abs(c["pos"][2] - p[2]) < 3:
+                        cands.append((d2(c["pos"], p) - 40, (c["pos"][0], c["pos"][1]), "cube"))
+                        continue
+                    rc = self.roof_cost(me, c["pos"], t, hp_frac, near_threats, inzone_pt)
+                    if rc is not None:
+                        cands.append((d2(c["pos"], p) - 40 + rc, tuple(c["pos"]), "roofcube"))
                     continue
                 if not inzone_pt(c["pos"]):
                     continue
@@ -556,6 +571,8 @@ class Bot:
             if want_pick:
                 pk = want_pick[1]
                 cands.append((-want_pick[0] + 10, (pk["pos"][0], pk["pos"][1]), "loot"))
+            if want_roof:
+                cands.append((-want_roof[0] + 10, tuple(want_roof[1]), "roofloot"))
             for dr in obs.get("drops", []):
                 dd = d2(dr["pos"], p)
                 if dd < 220 and dr["lands_in"] < dd / speed + 6 and inzone_pt(dr["pos"], 4) and not near_threats:
@@ -566,6 +583,9 @@ class Bot:
                 cands.sort(key=lambda c: c[0])
                 nav_goal = cands[0][1]
                 goal_desc = cands[0][2]
+                if goal_desc.startswith("roof"):
+                    move, jump, boost = self.climb_to(me, nav_goal, t)
+                    nav_goal = None
             elif zone_goal is not None:
                 nav_goal = zone_goal
                 goal_desc = "zone"
@@ -628,8 +648,6 @@ class Bot:
                 for c in obs["crates"]:
                     dd = d2(c["pos"], p)
                     if dd > 120:
-                        continue
-                    if self.map and abs(c["pos"][2] - self.map.floor_at(c["pos"][0], c["pos"][1])) > 2.5:
                         continue
                     if not inzone_pt(c["pos"], 0):
                         continue
@@ -819,6 +837,45 @@ class Bot:
             if best:
                 return best[1]
         return None
+
+    def roof_cost(self, me, pos, t, hp_frac, near_threats, ok):
+        """Extra cost of jetting up to a roof item, or None when it isn't worth trying."""
+        if self.map is None or near_threats or hp_frac < 0.6 or t > 240:
+            return None
+        h = pos[2] - me["pos"][2]
+        if h < -3 or h > 40:
+            return None
+        if d2(pos, me["pos"]) > 140 or not ok(pos, 15):
+            return None
+        if self.bad_targets.get(("roof", round(pos[0]), round(pos[1])), -1) > t:
+            return None
+        return 25 + max(0.0, h) * 1.5
+
+    def climb_to(self, me, goal, t):
+        """Walk to the building edge nearest `goal`, then jump and jet onto the roof and walk to it."""
+        p = me["pos"]
+        gx, gy, gz = goal[0], goal[1], goal[2]
+        key = ("roof", round(gx), round(gy))
+        if self.climb_key != key:
+            self.climb_key = key
+            self.climb_t0 = t
+        if t - self.climb_t0 > 25:  # give up on this one for a while
+            self.bad_targets[key] = t + 60
+            return (0.0, 0.0), False, False
+        direct = self.unit(gx - p[0], gy - p[1])
+        if p[2] > gz - 1.0:
+            return direct, False, False  # on the roof (or above it): walk over
+        nf = self.map.nearest_free(gx, gy, maxr=20)
+        if nf is None:
+            self.bad_targets[key] = t + 60
+            return (0.0, 0.0), False, False
+        ax, ay = self.map.gpos(*nf)
+        if d2((ax, ay), p) > 5 and me["grounded"]:
+            return self.path_to(me, (ax, ay), t), False, False
+        need = 1.5 * max(0.0, gz - p[2]) + 15
+        if me["grounded"] and me["energy"] < min(need, me["max_energy"] - 2):
+            return (0.0, 0.0), False, False  # wait at the wall for energy
+        return direct, bool(me["grounded"]), me["energy"] > 1
 
     def explore_point(self, me, nc, nr, zc, zr):
         p = me["pos"]
